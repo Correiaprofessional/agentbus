@@ -145,9 +145,12 @@ claude   mcp add agentbus -- node /path/bin/agentbus.js mcp
 codex    mcp add agentbus -- node /path/bin/agentbus.js mcp
 copilot  mcp add agentbus -- node /path/bin/agentbus.js mcp
 opencode mcp add agentbus -- node /path/bin/agentbus.js mcp
+vscode   servers.agentbus in Code/User/mcp.json
 ```
 
-Any other MCP client (Antigravity, VS Code, Cursor) takes a `.mcp.json`:
+VS Code has its own registry, so `connect` writes `servers.agentbus` into its
+user `mcp.json` (merging, never replacing the other servers). Any other client —
+Cursor, Claude Code, Antigravity — takes the same server as `mcpServers.agentbus`:
 
 ```json
 { "mcpServers": { "agentbus": { "command": "node", "args": ["/path/bin/agentbus.js", "mcp"] } } }

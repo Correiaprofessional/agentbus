@@ -807,7 +807,42 @@ const MCP_CLIENTS = [
   { tool: 'codex', label: 'Codex', args: ['mcp', 'add', 'agentbus', '--', 'node', BIN, 'mcp'] },
   { tool: 'copilot', label: 'GitHub Copilot', args: ['mcp', 'add', 'agentbus', '--', 'node', BIN, 'mcp'] },
   { tool: 'opencode', label: 'opencode', args: ['mcp', 'add', 'agentbus', '--', 'node', BIN, 'mcp'] },
+  { label: 'VS Code (Copilot Chat)', vscode: true },
 ];
+
+/** VS Code keeps its own registry: Code/User/mcp.json, under `servers`. */
+function vscodeMcpFiles() {
+  const home = os.homedir();
+  const dirs =
+    {
+      darwin: ['Library/Application Support/Code/User', 'Library/Application Support/Code - Insiders/User'],
+      win32: ['Code/User', 'Code - Insiders/User'],
+      linux: ['.config/Code/User', '.config/Code - Insiders/User'],
+    }[process.platform] || [];
+  const base = process.platform === 'win32' ? process.env.APPDATA || home : home;
+  return dirs.map((dir) => path.join(base, dir, 'mcp.json')).filter((file) => fs.existsSync(path.dirname(file)));
+}
+
+/** mcp.json allows comments and trailing commas; read it that way. */
+function readJsonc(file) {
+  const cleaned = fs
+    .readFileSync(file, 'utf8')
+    .replace(/^\s*\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/,(\s*[}\]])\1/g, '$1');
+  return JSON.parse(cleaned);
+}
+
+/** Add or replace servers.agentbus without disturbing the other servers. */
+function registerVsCode(file, entry) {
+  const config = fs.existsSync(file) ? readJsonc(file) : {};
+  const servers = config.servers && typeof config.servers === 'object' ? config.servers : {};
+  const existed = Boolean(servers.agentbus);
+  servers.agentbus = entry;
+  config.servers = servers;
+  fs.writeFileSync(file, JSON.stringify(config, null, '\t') + '\n');
+  return existed ? 'updated' : 'registered';
+}
 
 /** Some agents ship inside an app bundle, never on PATH (Codex lives in ChatGPT.app). */
 const BUNDLED_BINS = {
@@ -833,7 +868,31 @@ async function cmdConnect(flags) {
   log('MCP server: node ' + BIN + ' mcp (stdio, no port, no API key)');
   log();
 
+  const vscodeEntry = { type: 'stdio', command: 'node', args: [BIN, 'mcp'] };
+
   for (const client of MCP_CLIENTS) {
+    if (client.vscode) {
+      const files = vscodeMcpFiles();
+      if (!files.length) {
+        log(`${paint.dim('—')} ${client.label}: not installed here`);
+        continue;
+      }
+      for (const file of files) {
+        if (!flags.install) {
+          log(`${paint.green('✓')} ${client.label}: servers.agentbus in ${file}`);
+          continue;
+        }
+        try {
+          const action = registerVsCode(file, vscodeEntry);
+          log(`${paint.green(action)} ${client.label}  ${paint.dim(`(${file})`)}`);
+        } catch (error) {
+          log(`${paint.yellow('failed')} ${client.label}: ${error.message}`);
+          log(paint.dim(`    add it by hand: ${JSON.stringify({ servers: { agentbus: vscodeEntry } })}`));
+        }
+      }
+      continue;
+    }
+
     const found = which(client.tool);
     const command = `${client.tool} ${client.args.join(' ')}`;
     if (!found) {
@@ -847,7 +906,12 @@ async function cmdConnect(flags) {
       continue;
     }
 
-    const res = spawnSync(found, client.args, { encoding: 'utf8' });
+    let res = spawnSync(found, client.args, { encoding: 'utf8' });
+    // Re-adding is how a client updates an entry, but some refuse to overwrite.
+    if (res.status !== 0 && /already exists/i.test(`${res.stderr || ''}${res.stdout || ''}`)) {
+      spawnSync(found, ['mcp', 'remove', 'agentbus'], { encoding: 'utf8' });
+      res = spawnSync(found, client.args, { encoding: 'utf8' });
+    }
     if (res.status === 0) {
       log(`${paint.green('registered')} ${client.label}  ${paint.dim(`(${found})`)}`);
     } else {
@@ -860,7 +924,7 @@ async function cmdConnect(flags) {
   log(paint.dim('opencode keeps the same entry in ~/.config/opencode/opencode.jsonc:'));
   log(paint.dim(JSON.stringify({ mcp: { agentbus: { type: 'local', command: ['node', BIN, 'mcp'], enabled: true } } }, null, 2)));
   log();
-  log('Any other MCP client (Antigravity, VS Code, Cursor) — .mcp.json in the project:');
+  log('Cursor (~/.cursor/mcp.json), Claude Code (.mcp.json) and other clients:');
   log(paint.dim(jsonSnippet));
   log();
   log(paint.dim('then run `agentbus instructions --install` so every agent is told to use the board'));
