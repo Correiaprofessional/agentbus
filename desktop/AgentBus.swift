@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let copyItem = NSMenuItem(title: "Copy board URL", action: nil, keyEquivalent: "c")
     private let startItem = NSMenuItem(title: "Start daemon", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(title: "Stop daemon", action: nil, keyEquivalent: "")
+    private let updateItem = NSMenuItem(title: "Update agentbus", action: nil, keyEquivalent: "u")
     private var timer: Timer?
     private var port: Int?
     private var token: String?
@@ -66,6 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startItem.action = #selector(startDaemon)
         stopItem.target = self
         stopItem.action = #selector(stopDaemon)
+        updateItem.target = self
+        updateItem.action = #selector(updateAgentbus)
 
         menu.addItem(statusLine)
         menu.addItem(.separator())
@@ -74,6 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(startItem)
         menu.addItem(stopItem)
+        menu.addItem(.separator())
+        menu.addItem(updateItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit agentbus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
@@ -155,6 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         copyItem.isEnabled = boardURL != nil
         startItem.isEnabled = false
         stopItem.isEnabled = true
+        updateItem.isEnabled = true
         statusItem.button?.title = agents > 0 ? " \(agents)" : ""
         statusItem.button?.toolTip = running > 0
             ? "agentbus — \(agents) on the board, \(running) running · \(where_)"
@@ -169,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         copyItem.isEnabled = false
         startItem.isEnabled = FileManager.default.fileExists(atPath: binPath)
         stopItem.isEnabled = false
+        updateItem.isEnabled = FileManager.default.fileExists(atPath: binPath)
         statusItem.button?.title = ""
         statusItem.button?.toolTip = "agentbus — \(reason)"
     }
@@ -187,6 +194,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try process.run()
         } catch {
             completion?()
+        }
+    }
+
+    /** Like run(), but hands the command's output to the menu bar. */
+    private func runCapturing(_ arguments: [String], completion: @escaping (String) -> Void) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = (binIsScript ? ["node", binPath] : [binPath]) + arguments
+        process.currentDirectoryURL = root
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.terminationHandler = { _ in
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let text = String(data: data, encoding: .utf8) ?? ""
+            DispatchQueue.main.async { completion(text) }
+        }
+        do {
+            try process.run()
+        } catch {
+            completion("cannot run \(binPath)")
         }
     }
 
@@ -209,6 +237,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func stopDaemon() {
         run(["stop"]) { [weak self] in self?.refresh() }
+    }
+
+    /// Pull a newer agentbus. The CLI restarts the daemon and rebuilds this app;
+    /// the menu reports what it said, so the next launch is the new build.
+    @objc private func updateAgentbus() {
+        updateItem.isEnabled = false
+        statusLine.title = "checking for updates…"
+        runCapturing(["update"]) { [weak self] output in
+            guard let self else { return }
+            let lines = output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+            if let first = lines.first {
+                self.statusLine.title = first
+                if lines.count > 1 { self.statusItem.button?.toolTip = output }
+            }
+            self.updateItem.isEnabled = true
+            self.refresh()
+        }
     }
 }
 

@@ -119,6 +119,7 @@ The URL carries the bus token, which is why only `agentbus ui` prints it.
 | `agentbus mcp` | the MCP server on stdio |
 | `agentbus connect [--install]` | register that MCP server with each agent installed here |
 | `agentbus instructions [--install]` | the board rules, printed or written into agent instruction files |
+| `agentbus update [--check]` | pull a newer agentbus, restart the daemon, rebuild the menu bar app |
 
 ## MCP: the board as tools
 
@@ -244,6 +245,25 @@ Only an app's real main executable counts (`<Name>.app/Contents/MacOS/<bin>`) pl
 tool binaries by exact name, so Electron helpers and sandbox processes inside
 those bundles are ignored. An agent listed as running is de-duplicated once it
 connects.
+
+## Updating
+
+```bash
+agentbus update --check      # is there a newer version? (1 commit, 4 files)
+agentbus update              # pull it, restart the daemon, rebuild the app
+```
+
+`update` fast-forwards the checkout, then makes the running pieces use the new
+code: it restarts the daemon (so the bus stops running the old sources) and
+rebuilds `desktop/AgentBus.app` if you have built it. It refuses to run on a
+checkout with uncommitted changes, so it cannot clobber local edits, and it
+reports `already up to date (abc1234)` when there is nothing to do.
+
+Agents can do this themselves: the menu bar has **Update agentbus**, the CLI
+block written into their instructions lists `agentbus update`, and the MCP server
+says so in the instructions it hands the client at startup. If agentbus was not
+installed from a checkout (for example from npm), `update` says so and prints the
+command that matches your install instead of guessing.
 
 ## How it works
 

@@ -36,6 +36,7 @@ const OPTIONS = {
   after: { type: 'string' },
   open: { type: 'boolean' },
   install: { type: 'boolean' },
+  check: { type: 'boolean' },
   limit: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
 };
@@ -70,6 +71,9 @@ TALKING
 
 VIEW
   ui [--open]                       live board in the browser: who is talking to whom
+
+UPDATE
+  update [--check]                  pull the latest agentbus, restart the daemon, rebuild the app
 
 CONNECT
   mcp                               run the board as an MCP server (stdio) for an agent to spawn
@@ -521,6 +525,7 @@ Without MCP, the same board over the CLI:
     node ${BIN} send "..." --to <name>          # one agent
     node ${BIN} inbox --wait 30
     node ${BIN} status
+    node ${BIN} update                      # pull a newer agentbus and restart it
 
 Rules
 
@@ -590,6 +595,107 @@ async function cmdInstructions(flags) {
   for (const { agent, file } of instructionTargets()) {
     const result = upsertBlock(file);
     log(`${result === 'unchanged' ? paint.dim('same') : paint.green(result)}  ${file}  ${paint.dim(agent)}`);
+  }
+}
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+function git(args) {
+  return spawnSync('git', ['-C', REPO_ROOT, ...args], { encoding: 'utf8' });
+}
+
+/** First line of a spawned command's output, for one-line reports. */
+function firstLine(result) {
+  return String(result?.stderr || result?.stdout || '').trim().split('\n')[0];
+}
+
+/**
+ * Pull the latest agentbus and make the running pieces use it: the daemon is
+ * restarted and the menu bar app rebuilt. Refuses to touch a dirty checkout.
+ */
+async function cmdUpdate(flags) {
+  const inside = git(['rev-parse', '--is-inside-work-tree']);
+  if (inside.status !== 0 || inside.stdout.trim() !== 'true') {
+    log('agentbus is not a git checkout here, so it cannot update itself.');
+    log(paint.dim('update it the way you installed it, e.g. `npm install -g agentbus@latest`'));
+    process.exitCode = 1;
+    return;
+  }
+
+  const before = git(['rev-parse', 'HEAD']).stdout.trim();
+  const shortBefore = before.slice(0, 7);
+
+  const fetched = git(['fetch', '--quiet', 'origin']);
+  if (fetched.status !== 0) {
+    log(`cannot reach origin: ${firstLine(fetched) || 'fetch failed'}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const upstreamRef = git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+  const upstream = upstreamRef.status === 0 ? upstreamRef.stdout.trim() : 'origin/main';
+  const remote = git(['rev-parse', upstream]);
+  if (remote.status !== 0) {
+    log(`cannot resolve ${upstream} — is this branch tracking a remote?`);
+    process.exitCode = 1;
+    return;
+  }
+  const target = remote.stdout.trim();
+
+  if (before === target) {
+    log(`already up to date (${shortBefore})`);
+    return;
+  }
+
+  const changed = git(['diff', '--name-only', before, target])
+    .stdout.trim()
+    .split('\n')
+    .filter(Boolean);
+  const commits = git(['rev-list', '--count', `${before}..${target}`]).stdout.trim();
+
+  if (flags.check) {
+    log(`${commits} new commit(s): ${shortBefore} → ${target.slice(0, 7)} · ${changed.length} file(s)`);
+    log(paint.dim('apply with `agentbus update`'));
+    return;
+  }
+
+  const dirty = git(['status', '--porcelain']).stdout.trim();
+  if (dirty) {
+    log(`${paint.yellow('local changes')} here — commit or stash them first, so the update cannot clobber your edits:`);
+    log(paint.dim(dirty.split('\n').slice(0, 6).join('\n')));
+    process.exitCode = 1;
+    return;
+  }
+
+  const pull = git(['merge', '--ff-only', '--quiet', target]);
+  if (pull.status !== 0) {
+    log(`fast-forward failed: ${firstLine(pull) || 'see git status'}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const after = git(['rev-parse', '--short', 'HEAD']).stdout.trim();
+  log(`${paint.green('updated')} ${shortBefore} → ${after} · ${changed.length} file(s) across ${commits} commit(s)`);
+
+  const info = paths.readDaemonInfo();
+  if (info && paths.isAlive(info.pid)) {
+    log(paint.dim('restarting the daemon so the running bus uses the new code'));
+    await cmdStop();
+    await cmdStart({});
+  }
+
+  const bundle = path.join(REPO_ROOT, 'desktop', 'AgentBus.app');
+  if (fs.existsSync(bundle)) {
+    if (!which('swiftc')) {
+      log(paint.yellow('menu bar app not rebuilt') + paint.dim(' (swiftc missing — xcode-select --install)'));
+      return;
+    }
+    const build = spawnSync('bash', [path.join(REPO_ROOT, 'desktop', 'build.sh')], { encoding: 'utf8' });
+    if (build.status === 0) {
+      log(`menu bar app rebuilt ${paint.dim('— quit and reopen AgentBus.app to load it')}`);
+    } else {
+      log(paint.yellow('menu bar app rebuild failed: ') + (firstLine(build) || 'see desktop/build.sh'));
+    }
   }
 }
 
@@ -712,6 +818,8 @@ export async function main(argv = process.argv.slice(2)) {
       return cmdInstructions(flags);
     case 'mcp':
       return cmdMcp();
+    case 'update':
+      return cmdUpdate(flags);
     case 'connect':
       return cmdConnect(flags);
     case 'help':
