@@ -642,8 +642,24 @@ async function cmdUpdate(flags) {
   }
   const target = remote.stdout.trim();
 
-  if (before === target) {
-    log(`already up to date (${shortBefore})`);
+  // Direction matters: only a checkout that is strictly behind can fast-forward.
+  const behind = Number(git(['rev-list', '--count', `${before}..${target}`]).stdout.trim() || 0);
+  const ahead = Number(git(['rev-list', '--count', `${target}..${before}`]).stdout.trim() || 0);
+
+  if (behind === 0) {
+    log(
+      ahead
+        ? `already up to date (${shortBefore}, ${ahead} commit(s) ahead of ${upstream})`
+        : `already up to date (${shortBefore})`,
+    );
+    return;
+  }
+
+  if (ahead > 0) {
+    log(
+      `${paint.yellow('diverged')} from ${upstream}: ${behind} behind, ${ahead} ahead — rebase or merge by hand`,
+    );
+    process.exitCode = 1;
     return;
   }
 
@@ -651,10 +667,9 @@ async function cmdUpdate(flags) {
     .stdout.trim()
     .split('\n')
     .filter(Boolean);
-  const commits = git(['rev-list', '--count', `${before}..${target}`]).stdout.trim();
 
   if (flags.check) {
-    log(`${commits} new commit(s): ${shortBefore} → ${target.slice(0, 7)} · ${changed.length} file(s)`);
+    log(`${behind} new commit(s): ${shortBefore} → ${target.slice(0, 7)} · ${changed.length} file(s)`);
     log(paint.dim('apply with `agentbus update`'));
     return;
   }
@@ -675,7 +690,7 @@ async function cmdUpdate(flags) {
   }
 
   const after = git(['rev-parse', '--short', 'HEAD']).stdout.trim();
-  log(`${paint.green('updated')} ${shortBefore} → ${after} · ${changed.length} file(s) across ${commits} commit(s)`);
+  log(`${paint.green('updated')} ${shortBefore} → ${after} · ${changed.length} file(s) across ${behind} commit(s)`);
 
   const info = paths.readDaemonInfo();
   if (info && paths.isAlive(info.pid)) {
