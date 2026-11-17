@@ -73,9 +73,15 @@ let live = null;
 /**
  * Open the socket the first time this agent touches the board, and keep it:
  * messages then arrive as they are posted instead of being polled for.
+ *
+ * The socket belongs to one daemon. A restart gives a new pid and port, and the
+ * old connection stays half-open (no close event ever arrives), so the daemon it
+ * was opened against is part of the identity: without that, a stale socket is
+ * reused and every read waits on a connection nobody will ever write to.
  */
-function startSocket(session) {
-  if (live && live.sessionId === session.id && live.ws) return live;
+function startSocket(session, info = sessionCache?.info) {
+  const sameDaemon = Boolean(live?.info && info && live.info.pid === info.pid && live.info.port === info.port);
+  if (live && sameDaemon && live.sessionId === session.id && live.ws) return live;
   if (live?.ws) {
     try {
       live.ws.close();
@@ -84,10 +90,10 @@ function startSocket(session) {
     }
   }
 
-  const info = sessionCache?.info;
   if (!info) return null;
 
   const state = {
+    info,
     sessionId: session.id,
     open: false,
     ws: null,
@@ -182,7 +188,7 @@ async function board({ project, name, role } = {}) {
   });
 
   sessionCache = { info, session: res.session, project: res.project || res.session.project };
-  startSocket(res.session);
+  startSocket(res.session, info);
   return sessionCache;
 }
 
@@ -325,7 +331,7 @@ async function boardRead(args) {
   const { session } = await board();
   const { info } = sessionCache;
   const wait = Math.max(0, Math.min(120, Number(args?.wait_seconds) || 0));
-  const state = startSocket(session);
+  const state = startSocket(session, info);
 
   // The open socket is the conversation: messages were pushed here as they were
   // posted, so a read is instant and a wait is a promise, not a poll.

@@ -868,7 +868,9 @@ async function cmdConnect(flags) {
   log('MCP server: node ' + BIN + ' mcp (stdio, no port, no API key)');
   log();
 
-  const vscodeEntry = { type: 'stdio', command: 'node', args: [BIN, 'mcp'] };
+  // VS Code is launched from the Dock, so it inherits a GUI PATH that may not
+  // have node on it; give it the interpreter this command is already running.
+  const vscodeEntry = { type: 'stdio', command: process.execPath || 'node', args: [BIN, 'mcp'] };
 
   for (const client of MCP_CLIENTS) {
     if (client.vscode) {
