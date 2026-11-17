@@ -525,7 +525,7 @@ Without MCP, the same board over the CLI:
     node ${BIN} send "..." --to <name>          # one agent
     node ${BIN} inbox --wait 30
     node ${BIN} status
-    node ${BIN} update                      # pull a newer agentbus and restart it
+    node ${BIN} update                      # pull a newer agentbus, restart it, relaunch the app
 
 Rules
 
@@ -607,6 +607,63 @@ function git(args) {
 /** First line of a spawned command's output, for one-line reports. */
 function firstLine(result) {
   return String(result?.stderr || result?.stdout || '').trim().split('\n')[0];
+}
+
+/** The version this checkout declares, so a report can name what is running. */
+function appVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version || '?';
+  } catch {
+    return '?';
+  }
+}
+
+/**
+ * Pids actually executing `exe`. Matched against argv[0] only, so a shell whose
+ * command line merely mentions the path is never mistaken for the running app.
+ */
+function appPids(exe) {
+  const ps = spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8' });
+  return String(ps.stdout || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [pid, ...rest] = line.split(/\s+/);
+      return { pid: Number(pid), argv0: rest[0] || '' };
+    })
+    .filter((entry) => entry.argv0 === exe)
+    .map((entry) => entry.pid);
+}
+
+/** Wait for `check()` to become truthy, up to `ms`, without dependencies. */
+function waitFor(check, ms, every = 100) {
+  const deadline = Date.now() + ms;
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  while (!check() && Date.now() < deadline) Atomics.wait(nap, 0, 0, every);
+  return check();
+}
+
+/**
+ * Replace the running menu bar app with the freshly built one, so an update
+ * needs no manual quit-and-reopen.
+ */
+function relaunchApp(bundle) {
+  const exe = path.join(bundle, 'Contents', 'MacOS', 'AgentBus');
+  const wasRunning = appPids(exe).length > 0;
+
+  for (const pid of appPids(exe)) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      /* already gone */
+    }
+  }
+  waitFor(() => appPids(exe).length === 0, 3000);
+
+  spawnSync('open', [bundle], { stdio: 'ignore' });
+  const up = waitFor(() => appPids(exe).length > 0, 4000);
+  return { wasRunning, up };
 }
 
 /**
@@ -706,10 +763,23 @@ async function cmdUpdate(flags) {
       return;
     }
     const build = spawnSync('bash', [path.join(REPO_ROOT, 'desktop', 'build.sh')], { encoding: 'utf8' });
-    if (build.status === 0) {
-      log(`menu bar app rebuilt ${paint.dim('— quit and reopen AgentBus.app to load it')}`);
-    } else {
+    if (build.status !== 0) {
       log(paint.yellow('menu bar app rebuild failed: ') + (firstLine(build) || 'see desktop/build.sh'));
+      return;
+    }
+
+    // Update is often run from the menu bar app itself, and the relaunch below
+    // ends that process: nobody is left reading our pipe, so don't die of EPIPE.
+    process.stdout.on('error', () => {});
+    process.stderr.on('error', () => {});
+
+    const version = appVersion();
+    const { wasRunning, up } = relaunchApp(bundle);
+    const now = `${version} (${after})`;
+    if (up) {
+      log(`${wasRunning ? 'menu bar app relaunched' : 'menu bar app started'} · ${now}`);
+    } else {
+      log(paint.yellow('menu bar app rebuilt but not running') + ` · ${now}`);
     }
   }
 }

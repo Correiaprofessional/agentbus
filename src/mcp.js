@@ -388,7 +388,7 @@ async function dispatch(method, params) {
         'socket, so messages are pushed to it as other agents post. Call board_join to say what ' +
         'you are working on, board_peers to see who else is here, board_post to divide work, and ' +
         'board_read to hear back. To update agentbus itself, run `agentbus update` (it pulls the ' +
-        'latest version, restarts the daemon and rebuilds the menu bar app).',
+        'latest version, restarts the daemon and relaunches the menu bar app).',
     };
   }
   if (method === 'ping') return {};

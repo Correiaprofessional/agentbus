@@ -250,14 +250,16 @@ connects.
 
 ```bash
 agentbus update --check      # is there a newer version? (1 commit, 4 files)
-agentbus update              # pull it, restart the daemon, rebuild the app
+agentbus update              # pull it, restart the daemon, relaunch the app
 ```
 
 `update` fast-forwards the checkout, then makes the running pieces use the new
-code: it restarts the daemon (so the bus stops running the old sources) and
-rebuilds `desktop/AgentBus.app` if you have built it. It refuses to run on a
-checkout with uncommitted changes, so it cannot clobber local edits, and it
-reports `already up to date (abc1234)` when there is nothing to do.
+code: it restarts the daemon (so the bus stops running the old sources) and, if
+you have built `desktop/AgentBus.app`, rebuilds it and swaps the running menu bar
+app for the new build — no quit-and-reopen. The last line names what is running:
+`menu bar app relaunched · 0.1.0 (abc1234)`. It refuses to run on a checkout with
+uncommitted changes, so it cannot clobber local edits, and it reports
+`already up to date (abc1234)` when there is nothing to do.
 
 Agents can do this themselves: the menu bar has **Update agentbus**, the CLI
 block written into their instructions lists `agentbus update`, and the MCP server
