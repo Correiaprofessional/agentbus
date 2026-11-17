@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentbus</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12151c;
+    --line: #232936;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --accent: #7c5cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    background: #0e1117;
+  }
+  .brand { font-weight: 650; letter-spacing: -0.01em; }
+  .brand span { color: var(--accent); }
+  .meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .dot { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: #4b5563; }
+  .dot.live { background: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.15); }
+  .dot.dead { background: #ef4444; }
+  main { flex: 1; display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+  aside { border-right: 1px solid var(--line); overflow: auto; background: var(--panel); }
+  section { display: flex; flex-direction: column; min-height: 0; }
+  h2 {
+    margin: 0;
+    padding: 10px 16px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  #plist { padding: 0 8px 16px; }
+  .project { padding: 8px; border-radius: 8px; margin-bottom: 4px; }
+  .apps { border-bottom: 1px solid var(--line); border-radius: 0; margin-bottom: 8px; padding-bottom: 10px; }
+  .project:hover { background: #171b24; }
+  .pname { display: flex; align-items: baseline; gap: 6px; font-weight: 600; }
+  .branch { color: var(--muted); font-weight: 400; font-size: 11px; }
+  .sess { display: flex; align-items: center; gap: 6px; padding: 4px 0 0 2px; color: var(--muted); }
+  .sess b { color: var(--text); font-weight: 500; }
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 999px;
+    color: #0b0d12;
+    background: var(--c, #6b7280);
+  }
+  .state { font-size: 11px; margin-left: auto; font-variant-numeric: tabular-nums; }
+  .sess.running b { font-weight: 400; color: var(--muted); }
+  .badge.ghost { background: transparent; color: var(--c, #6b7280); border: 1px dashed var(--c, #6b7280); }
+  #msgs { flex: 1; overflow: auto; padding: 0 16px 24px; }
+  .msg { display: grid; grid-template-columns: 68px 1fr; gap: 10px; padding: 8px 0; border-top: 1px solid #161a22; }
+  .msg:first-child { border-top: 0; }
+  .t { color: #5d6577; font-variant-numeric: tabular-nums; font-size: 12px; }
+  .head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .who { font-weight: 600; }
+  .arrow { color: #5d6577; }
+  .to { font-weight: 500; }
+  .to.all { color: var(--muted); }
+  .to.tool { color: #60a5fa; }
+  .to.session { color: #34d399; }
+  .proj { margin-left: 4px; font-size: 11px; color: #5d6577; }
+  .text { color: #cfd5e1; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .empty { color: var(--muted); padding: 16px; }
+  .empty code { color: #c4b5fd; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">agent<span>bus</span></div>
+  <div class="meta" id="meta">connecting…</div>
+  <div class="dot" id="dot"></div>
+</header>
+<main>
+  <aside>
+    <h2>Agents by project</h2>
+    <div id="plist"></div>
+  </aside>
+  <section>
+    <h2>Who is talking to whom</h2>
+    <div id="msgs"></div>
+  </section>
+</main>
+<script>
+  const token = new URLSearchParams(location.search).get('t') || '';
+  const H = { 'x-agentbus-token': token };
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  const TOOL_COLORS = {
+    freebuff: '#a78bfa', chatgpt: '#34d399', claude: '#e2795b', codex: '#10b981',
+    copilot: '#60a5fa', opencode: '#fbbf24', antigravity: '#22d3ee',
+  };
+  const colorFor = (tool) => TOOL_COLORS[String(tool || '').toLowerCase()] || '#6b7280';
+  const ago = (ms) => {
+    if (ms < 1500) return 'now';
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.round(s / 60);
+    return m < 60 ? m + 'm' : Math.round(m / 60) + 'h';
+  };
+  const clock = (iso) => new Date(iso).toTimeString().slice(0, 8);
+
+  function renderProjects(overview) {
+    const projects = overview.otherProjects || [];
+    const apps = overview.apps || [];
+    const runningCount = (overview.running || []).length + apps.length;
+    const parts = [`${overview.totalActive} connected`];
+    if (runningCount) parts.push(`${runningCount} running`);
+    parts.push(`${projects.length} project${projects.length === 1 ? '' : 's'}`);
+    $('meta').textContent = parts.join(' · ');
+    const appRow = (a) => `
+      <div class="sess running">
+        <span class="badge ghost" style="--c:${colorFor(a.tool)}">${esc(a.tool)}</span>
+        <b>pid ${esc(a.pid)}</b>
+        <span class="state">running</span>
+      </div>`;
+    const appsHtml = apps.length
+      ? `<div class="project apps"><div class="pname">Applications</div>${apps.map(appRow).join('')}</div>`
+      : '';
+    if (!projects.length && !apps.length) {
+      $('plist').innerHTML = '<div class="empty">No agents running or connected.<br>Open an agent in a project and it appears here.</div>';
+      return;
+    }
+    $('plist').innerHTML = appsHtml + projects.map((entry) => {
+      const p = entry.project;
+      const branch = p.branch ? `<span class="branch">${esc(p.branch)}</span>` : '';
+      const same = entry.sameRepo ? '<span class="branch">same repo</span>' : '';
+      const sessions = entry.sessions.map((s) => `
+        <div class="sess">
+          <span class="badge" style="--c:${colorFor(s.tool)}">${esc(s.tool)}</span>
+          <b>${esc(s.name)}</b>
+          <span class="state">${esc(s.status)} · ${ago(s.idleMs)}</span>
+        </div>`).join('');
+      const running = (entry.running || []).map((r) => `
+        <div class="sess running">
+          <span class="badge ghost" style="--c:${colorFor(r.tool)}">${esc(r.tool)}</span>
+          <b>pid ${esc(r.pid)}</b>
+          <span class="state">running</span>
+        </div>`).join('');
+      return `<div class="project">
+        <div class="pname">${esc(p.name)} ${branch} ${same}</div>
+        ${sessions}${running}
+      </div>`;
+    }).join('');
+  }
+
+  function renderMessages(messages) {
+    if (!messages.length) {
+      $('msgs').innerHTML = '<div class="empty">No traffic yet. Messages show up here as agents talk.<br><code>agentbus send "…"</code></div>';
+      return;
+    }
+    $('msgs').innerHTML = messages.map((m) => {
+      const target = m.to.kind === 'session' ? 'session' : m.to.kind;
+      const who = `${esc(m.from.name)}<span class="arrow">(${esc(m.from.tool)}) →</span>`;
+      return `<div class="msg">
+        <div class="t">${clock(m.time)}</div>
+        <div>
+          <div class="head">
+            <span class="who">${who}</span>
+            <span class="to ${target}">${esc(m.to.label)}</span>
+            <span class="proj">${esc(m.project.name)}</span>
+          </div>
+          <div class="text">${esc(m.text)}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  let first = true;
+  let messages = [];
+
+  function paint() {
+    const box = $('msgs');
+    const stick = first || box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    renderMessages(messages);
+    if (stick) box.scrollTop = box.scrollHeight;
+    first = false;
+  }
+
+  async function refresh() {
+    try {
+      const [overview, log] = await Promise.all([
+        fetch('/api/overview', { headers: H }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+        fetch('/api/log?limit=150', { headers: H }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+      ]);
+      renderProjects(overview);
+      messages = log.messages || [];
+      paint();
+    } catch (err) {
+      $('dot').className = 'dot dead';
+      $('meta').textContent = 'daemon unreachable — is it still running?';
+    }
+  }
+
+  // One socket instead of a poll: new messages and presence arrive as events.
+  function connect() {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const token = new URLSearchParams(location.search).get('t') || '';
+    const ws = new WebSocket(`${scheme}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'subscribe', mode: 'board' }));
+      $('dot').className = 'dot live';
+      refresh();
+    };
+
+    ws.onmessage = (event) => {
+      let payload;
+      try { payload = JSON.parse(event.data); } catch { return; }
+      if (payload.type === 'message') {
+        if (!messages.some((m) => m.seq === payload.message.seq)) messages.push(payload.message);
+        paint();
+      } else if (payload.type === 'presence' || payload.type === 'ready') {
+        refresh();
+      }
+    };
+
+    ws.onclose = () => {
+      $('dot').className = 'dot dead';
+      setTimeout(connect, 1000);
+    };
+  }
+
+  refresh();
+  connect();
+</script>
+</body>
+</html>

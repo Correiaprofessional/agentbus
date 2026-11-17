@@ -1,0 +1,16 @@
+node_modules/
+.DS_Store
+*.log
+
+# daemon state (normally lives in ~/.agentbus, never here)
+.agentbus/
+
+# desktop build output — regenerate with `npm run icon` / `npm run app`
+desktop/AgentBus.app/
+desktop/AgentBus.iconset/
+desktop/AgentBus.icns
+desktop/icon-*.png
+desktop/MenuBarTemplate*.png
+
+# scratch
+.tmp-*

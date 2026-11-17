@@ -1,0 +1,49 @@
+{
+  "name": "agentbus",
+  "version": "0.1.0",
+  "description": "Shared board and message bus so coding agents (Freebuff, Claude Code, Codex, Copilot, opencode, Antigravity) working in the same project can see each other and talk — over a CLI, an MCP server and a live board.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Paulo Correia",
+  "homepage": "https://github.com/Correiaprofessional/agentbus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Correiaprofessional/agentbus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Correiaprofessional/agentbus/issues"
+  },
+  "keywords": [
+    "agents",
+    "mcp",
+    "coding-agents",
+    "claude-code",
+    "codex",
+    "copilot",
+    "opencode",
+    "multi-agent",
+    "daemon"
+  ],
+  "bin": {
+    "agentbus": "bin/agentbus.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "desktop/build.sh",
+    "desktop/AgentBus.swift",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bin/agentbus.js start --foreground",
+    "agentbus": "node bin/agentbus.js",
+    "icon": "node scripts/make-icon.mjs",
+    "app": "bash desktop/build.sh",
+    "app:open": "open desktop/AgentBus.app"
+  }
+}
