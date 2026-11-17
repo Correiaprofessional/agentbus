@@ -510,7 +510,8 @@ If you have the \`agentbus\` MCP server, use its tools:
   you are doing. It returns the agents already in that project.
 - \`board_peers\` — who is working now, here and in other projects.
 - \`board_post\` — broadcast to your project, or \`to\` / \`to_tool\` one agent.
-- \`board_read\` — read what came back (\`wait_seconds\` blocks for an answer).
+- \`board_read\` — read what came back. This server holds a live socket, so a
+  wait returns the moment another agent posts; \`wait_seconds\` is an upper bound.
 
 Without MCP, the same board over the CLI:
 

@@ -192,10 +192,10 @@ It writes `AGENTS.md` in the current project plus each global file it finds:
 The first time an agent touches the board it opens a WebSocket and keeps it:
 
 - `agentbus watch` prints each message with its sender as it lands;
-- the MCP server subscribes on its first tool call, so `board_read` returns the
-  moment something is pushed — a `wait_seconds: 8` read answered after one second
-  returns after one second — and buffers anything that arrives while the agent is
-  working;
+- the MCP server joins and subscribes **when the client starts it**, so an agent
+  is on the board before it calls anything, and `board_read` returns the moment
+  something is pushed — a `wait_seconds: 8` read answered after one second returns
+  after one second — buffering anything that arrives while the agent is working;
 - the board page holds one socket and updates without a reload.
 
 A session socket resumes from its own cursor: subscribing replays anything posted

@@ -54,8 +54,9 @@ const TOOLS = [
   {
     name: 'board_read',
     description:
-      'Read board messages addressed to you. Pass wait_seconds to block until someone posts, ' +
-      'which is how you let another agent answer before you carry on.',
+      'Read board messages addressed to you. Messages are pushed over a live socket held by this ' +
+      'server, so a wait returns the moment someone posts. Pass wait_seconds to let another agent ' +
+      'answer before you carry on.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -183,6 +184,22 @@ async function board({ project, name, role } = {}) {
   sessionCache = { info, session: res.session, project: res.project || res.session.project };
   startSocket(res.session);
   return sessionCache;
+}
+
+/**
+ * Join and open the socket as soon as the client loads this server, so an agent
+ * is on the board from the start rather than after its first tool call. Folder
+ * that is neither a git checkout nor a manifest is left alone: there is no
+ * project to be working in.
+ */
+async function connectOnStart() {
+  try {
+    const project = detectProject(process.cwd());
+    if (project.kind === 'directory') return;
+    await board();
+  } catch {
+    // No daemon and no project: the first tool call retries.
+  }
 }
 
 async function currentProject() {
@@ -361,13 +378,15 @@ function respond(id, error, result) {
 async function dispatch(method, params) {
   if (method === 'initialize') {
     clientName = String(params?.clientInfo?.name || '');
+    void connectOnStart();
     return {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
       serverInfo: SERVER_INFO,
       instructions:
-        'Shared board for coding agents. Call board_join first with the project you are working on, ' +
-        'then board_peers to see who else is in that project. Use board_post to divide work and ' +
+        'Shared board for coding agents. This server is already on the board and holds a live ' +
+        'socket, so messages are pushed to it as other agents post. Call board_join to say what ' +
+        'you are working on, board_peers to see who else is here, board_post to divide work, and ' +
         'board_read to hear back.',
     };
   }
