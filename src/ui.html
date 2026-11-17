@@ -68,6 +68,7 @@
   .state { font-size: 11px; margin-left: auto; font-variant-numeric: tabular-nums; }
   .sess.running b { font-weight: 400; color: var(--muted); }
   .badge.ghost { background: transparent; color: var(--c, #6b7280); border: 1px dashed var(--c, #6b7280); }
+  .logo { flex: 0 0 auto; display: inline-block; vertical-align: -2px; }
   #msgs { flex: 1; overflow: auto; padding: 0 16px 24px; }
   .msg { display: grid; grid-template-columns: 68px 1fr; gap: 10px; padding: 8px 0; border-top: 1px solid #161a22; }
   .msg:first-child { border-top: 0; }
@@ -112,6 +113,46 @@
     copilot: '#60a5fa', opencode: '#fbbf24', antigravity: '#22d3ee',
   };
   const colorFor = (tool) => TOOL_COLORS[String(tool || '').toLowerCase()] || '#6b7280';
+
+  // Inline marks: the board stays a single offline file with no image requests.
+  const hexagon = (c) => `
+    <path d="M12 3.1 19.7 7.6v8.8L12 20.9 4.3 16.4V7.6z" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="12" cy="12" r="2.5" fill="${c}"/>`;
+  const TOOL_LOGOS = {
+    freebuff: (c) => `
+      <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="${c}"/>
+      <path d="M13.3 5.2 7.4 13.3h3.7L10.7 18.8l5.9-8.1h-3.7z" fill="#0b0d12"/>`,
+    claude: (c) => `
+      <g stroke="${c}" stroke-width="2.1" stroke-linecap="round">
+        <path d="M12 3.2v17.6M3.2 12h17.6M5.9 5.9l12.2 12.2M18.1 5.9 5.9 18.1"/>
+      </g>`,
+    codex: (c) => `
+      <path d="M4.9 6.2 10 12l-5.1 5.8" fill="none" stroke="${c}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M12.6 17.8h6.3" fill="none" stroke="${c}" stroke-width="2.2" stroke-linecap="round"/>`,
+    chatgpt: hexagon,
+    copilot: (c) => `
+      <path d="M9.4 7.4 12 4l2.6 3.4" fill="none" stroke="${c}" stroke-width="1.9" stroke-linejoin="round"/>
+      <path d="M4 14.6c0-4.3 3.6-7.7 8-7.7s8 3.4 8 7.7v1.5a3.4 3.4 0 0 1-3.4 3.4H7.4A3.4 3.4 0 0 1 4 16.1z" fill="${c}"/>
+      <circle cx="9.4" cy="14" r="1.35" fill="#0b0d12"/>
+      <circle cx="14.6" cy="14" r="1.35" fill="#0b0d12"/>`,
+    opencode: (c) => `
+      <path d="M8.6 6.4 3.6 12l5 5.6M15.4 6.4 20.4 12l-5 5.6" fill="none" stroke="${c}" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M13.3 5.6 10.7 18.4" fill="none" stroke="${c}" stroke-width="2.1" stroke-linecap="round"/>`,
+    antigravity: () => `
+      <circle cx="12" cy="6.2" r="2.9" fill="#4285f4"/>
+      <circle cx="17.8" cy="12" r="2.9" fill="#ea4335"/>
+      <circle cx="12" cy="17.8" r="2.9" fill="#fbbc05"/>
+      <circle cx="6.2" cy="12" r="2.9" fill="#34a853"/>`,
+  };
+  const logoFor = (tool) => {
+    const key = String(tool || '').toLowerCase();
+    const draw = TOOL_LOGOS[key];
+    const inner = draw
+      ? draw(colorFor(key))
+      : `<rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="${colorFor(key)}"/>
+         <text x="12" y="16.4" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" font-weight="700" fill="#0b0d12">${esc((key[0] || '?').toUpperCase())}</text>`;
+    return `<svg class="logo" viewBox="0 0 24 24" width="14" height="14" role="img" aria-label="${esc(tool)} logo">${inner}</svg>`;
+  };
   const ago = (ms) => {
     if (ms < 1500) return 'now';
     const s = Math.round(ms / 1000);
@@ -131,6 +172,7 @@
     $('meta').textContent = parts.join(' · ');
     const appRow = (a) => `
       <div class="sess running">
+        ${logoFor(a.tool)}
         <span class="badge ghost" style="--c:${colorFor(a.tool)}">${esc(a.tool)}</span>
         <b>pid ${esc(a.pid)}</b>
         <span class="state">running</span>
@@ -148,12 +190,14 @@
       const same = entry.sameRepo ? '<span class="branch">same repo</span>' : '';
       const sessions = entry.sessions.map((s) => `
         <div class="sess">
+          ${logoFor(s.tool)}
           <span class="badge" style="--c:${colorFor(s.tool)}">${esc(s.tool)}</span>
           <b>${esc(s.name)}</b>
           <span class="state">${esc(s.status)} · ${ago(s.idleMs)}</span>
         </div>`).join('');
       const running = (entry.running || []).map((r) => `
         <div class="sess running">
+          ${logoFor(r.tool)}
           <span class="badge ghost" style="--c:${colorFor(r.tool)}">${esc(r.tool)}</span>
           <b>pid ${esc(r.pid)}</b>
           <span class="state">running</span>
@@ -172,7 +216,7 @@
     }
     $('msgs').innerHTML = messages.map((m) => {
       const target = m.to.kind === 'session' ? 'session' : m.to.kind;
-      const who = `${esc(m.from.name)}<span class="arrow">(${esc(m.from.tool)}) →</span>`;
+      const who = `${logoFor(m.from.tool)}<span class="who">${esc(m.from.name)}</span><span class="arrow">(${esc(m.from.tool)}) →</span>`;
       return `<div class="msg">
         <div class="t">${clock(m.time)}</div>
         <div>
