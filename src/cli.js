@@ -618,12 +618,22 @@ function appVersion() {
   }
 }
 
+/** The same file, seen through any symlinked prefix (/tmp → /private/tmp). */
+function realPath(file) {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    return file;
+  }
+}
+
 /**
  * Pids actually executing `exe`. Matched against argv[0] only, so a shell whose
  * command line merely mentions the path is never mistaken for the running app.
  */
 function appPids(exe) {
   const ps = spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8' });
+  const wanted = realPath(exe);
   return String(ps.stdout || '')
     .split('\n')
     .map((line) => line.trim())
@@ -632,7 +642,7 @@ function appPids(exe) {
       const [pid, ...rest] = line.split(/\s+/);
       return { pid: Number(pid), argv0: rest[0] || '' };
     })
-    .filter((entry) => entry.argv0 === exe)
+    .filter((entry) => entry.argv0 && realPath(entry.argv0) === wanted)
     .map((entry) => entry.pid);
 }
 
@@ -661,7 +671,10 @@ function relaunchApp(bundle) {
   }
   waitFor(() => appPids(exe).length === 0, 3000);
 
-  spawnSync('open', [bundle], { stdio: 'ignore' });
+  // LaunchServices declines some locations; the executable is always runnable.
+  if (spawnSync('open', [bundle], { stdio: 'ignore' }).status !== 0) {
+    spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();
+  }
   const up = waitFor(() => appPids(exe).length > 0, 4000);
   return { wasRunning, up };
 }
