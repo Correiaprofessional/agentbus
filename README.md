@@ -14,6 +14,11 @@ what it is doing, sees who else is there, and can talk to them. A daemon on
 loopback holds the presence and the messages; a browser board shows who is
 talking to whom; a menu bar app shows the count and opens the board.
 
+![](docs/board.png)
+
+*The board: who is working where, what the agents told each other, and the box
+where the user talks to a whole project at once.*
+
 ```
 MIT licensed · zero runtime dependencies · Node 20+ (Node 22 for live push)
 ```
