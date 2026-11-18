@@ -4,6 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Archive } from './archive.js';
 import { Bus, BusError } from './store.js';
 import { detectProject } from './project.js';
 import { scanRunningAgents } from './procs.js';
@@ -120,8 +121,31 @@ function queryNumber(url, name) {
 export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
   const authToken = token || process.env.AGENTBUS_TOKEN || crypto.randomBytes(18).toString('hex');
   const bus = new Bus();
+  const archive = new Archive();
   let shuttingDown = false;
+  let sweepTimer = null;
   const sockets = new Set();
+
+  /**
+   * Retention: a day on the board, a week in the archive, then gone.
+   *
+   * The minute-by-minute sweep keeps the board from holding yesterday, and the
+   * archive from holding last week; archiving happens here and never on a read,
+   * so a read is the same speed whatever the board has seen.
+   */
+  function sweep() {
+    try {
+      const retired = bus.retire();
+      if (retired.length) {
+        archive.append(retired);
+        note(`archived ${retired.length} message(s) older than a day`);
+      }
+      const dropped = archive.prune();
+      if (dropped) note(`deleted ${dropped} archived message(s) older than a week`);
+    } catch (error) {
+      note(`retention failed: ${error.message}`);
+    }
+  }
 
   /** Push an event to subscribed sockets, optionally filtered. */
   function broadcast(event, matches) {
@@ -292,7 +316,10 @@ export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
         if (!sessionId) throw new BusError(400, 'missing session');
         const waitMs = Math.min(MAX_WAIT_MS, Math.max(0, queryNumber(url, 'wait') ?? 0));
         const after = queryNumber(url, 'after');
-        const result = await bus.inbox(sessionId, { after, waitMs });
+        // peek reads from `after` and leaves the cursor where it was, so a
+        // hook can read a mailbox another process is already subscribed to.
+        const peek = url.searchParams.get('peek') === '1';
+        const result = peek ? bus.peek(sessionId, { after }) : await bus.inbox(sessionId, { after, waitMs });
         if (!result) throw new BusError(404, 'unknown session — re-run `agentbus join`');
         sendJson(res, 200, { ...result, ...bus.overview(sessionId) });
         return;
@@ -303,6 +330,24 @@ export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
         const session = sessionId ? bus.getSession(sessionId) : null;
         const projectId = url.searchParams.get('project') || session?.project.id || null;
         sendJson(res, 200, { messages: bus.log(projectId, queryNumber(url, 'limit') ?? 30) });
+        return;
+      }
+
+      if (pathname === '/api/search' && method === 'GET') {
+        const sessionId = url.searchParams.get('session');
+        const session = sessionId ? bus.getSession(sessionId) : null;
+        const projectId = url.searchParams.get('project') || session?.project?.id || null;
+        if (!projectId) throw new BusError(400, 'missing session');
+
+        const query = url.searchParams.get('q') || '';
+        const limit = Math.max(1, Math.min(50, queryNumber(url, 'limit') ?? 20));
+        const live = bus.search({ projectId, query, limit });
+        const older = archive.search({ projectId, query, limit }).map((m) => ({ ...m, archived: true }));
+        const seen = new Set(live.map((m) => m.id));
+        const messages = [...live, ...older.filter((m) => !seen.has(m.id))]
+          .sort((a, b) => new Date(b.time) - new Date(a.time))
+          .slice(0, limit);
+        sendJson(res, 200, { query, project: session?.project ?? null, messages });
         return;
       }
 
@@ -408,10 +453,15 @@ export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
   paths.writeDaemonInfo(info);
   note(`agentbus daemon ${VERSION} listening on ${host}:${info.port} (state ${paths.stateDir()})`);
 
+  sweep();
+  sweepTimer = setInterval(sweep, 60_000);
+  sweepTimer.unref?.();
+
   function shutdown(reason) {
     if (shuttingDown) return;
     shuttingDown = true;
     note(`stopping: ${reason}`);
+    clearInterval(sweepTimer);
     for (const client of sockets) client.close(1001);
     sockets.clear();
     paths.clearDaemonInfo(process.pid);

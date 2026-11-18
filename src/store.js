@@ -3,6 +3,11 @@ import crypto from 'node:crypto';
 const MAX_TEXT = 8000;
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 
+/** A message stays on the board this long, then moves to the archive. */
+export const LIVE_MS = 24 * 60 * 60 * 1000;
+/** How long the archive keeps it before it is deleted. */
+export const KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+
 export class BusError extends Error {
   constructor(status, message, extra = {}) {
     super(message);
@@ -221,7 +226,35 @@ export class Bus {
   }
 
   pending(session, fromSeq) {
-    return this.messages.filter((m) => m.seq > fromSeq && this.delivers(m, session));
+    const now = this.now();
+    return this.messages.filter((m) => m.seq > fromSeq && this.live(m, now) && this.delivers(m, session));
+  }
+
+  /** Still on the board: younger than a day. */
+  live(message, now = this.now()) {
+    return now - new Date(message.time).getTime() < LIVE_MS;
+  }
+
+  /** Take the messages past their day off the board; the daemon archives them. */
+  retire({ now = this.now() } = {}) {
+    const kept = [];
+    const stale = [];
+    for (const message of this.messages) (this.live(message, now) ? kept : stale).push(message);
+    this.messages = kept;
+    return stale;
+  }
+
+  /** Text search over what the board is still holding, newest first. */
+  search({ projectId, query, limit = 20 } = {}) {
+    const needle = String(query || '').trim().toLowerCase();
+    if (!needle) return [];
+    const now = this.now();
+    return this.messages
+      .filter((m) => this.live(m, now))
+      .filter((m) => !projectId || m.project.id === projectId)
+      .filter((m) => `${m.text}\n${m.from.name}\n${m.kind}`.toLowerCase().includes(needle))
+      .slice(-Math.max(1, Math.min(100, limit)))
+      .reverse();
   }
 
   /**
@@ -265,6 +298,21 @@ export class Bus {
       waiter.timer = setTimeout(() => waiter.finish([]), waitMs);
       this.waiters.add(waiter);
     });
+  }
+
+  /**
+   * The session's unread messages without consuming them.
+   *
+   * A second reader on one session (a Copilot hook reading while the MCP
+   * server holds the socket) needs to see what the socket already took, so it
+   * asks from its own cursor and leaves the session's cursor alone.
+   */
+  peek(sessionId, { after } = {}) {
+    const session = this.getSession(sessionId);
+    if (!session) return null;
+    session.lastSeen = this.now();
+    const from = Number.isFinite(after) ? after : session.cursor;
+    return { messages: this.pending(session, from), cursor: session.cursor, waitedMs: 0 };
   }
 
   drain(session, messages) {

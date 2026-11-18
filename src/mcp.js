@@ -1,5 +1,8 @@
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { ensureDaemon, request } from './client.js';
+import * as paths from './paths.js';
 import { detectProject, projectSummary } from './project.js';
 import { detectAncestorTool } from './agent.js';
 import { connectSocket } from './ws.js';
@@ -62,6 +65,21 @@ const TOOLS = [
       properties: {
         wait_seconds: { type: 'number', description: '0-120, how long to wait for a message.' },
       },
+    },
+  },
+  {
+    name: 'board_search',
+    description:
+      'Find earlier board messages in your project by text, sender or kind. The board keeps a ' +
+      'day of messages live and archives the rest for a week, so this is how you reach what was ' +
+      'said yesterday. Newest match first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Words to look for.' },
+        limit: { type: 'number', description: 'How many matches. Default 10, at most 50.' },
+      },
+      required: ['query'],
     },
   },
 ];
@@ -170,6 +188,44 @@ function toolLabel() {
   return detectAncestorTool().tool || 'agent';
 }
 
+/**
+ * Advertise the session this server holds.
+ *
+ * A hook runs in its own process and never sees this server's socket queue, so
+ * it needs the session id to read the same mailbox. The file is this process's
+ * pid, which keeps one window's session from overwriting another's.
+ */
+function publishSession(session, info) {
+  const dir = path.join(paths.stateDir(), 'mcp');
+  const file = path.join(dir, `${process.pid}.json`);
+  const entry = {
+    sessionId: session.id,
+    tool: session.tool,
+    cwd: process.cwd(),
+    daemon: { pid: info.pid, port: info.port },
+    updatedAt: Date.now(),
+  };
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify(entry), { mode: 0o600 });
+    fs.renameSync(`${file}.tmp`, file);
+  } catch {
+    // No file: a hook stays quiet, nothing else breaks.
+  }
+  if (publishSession.installed) return;
+  publishSession.installed = true;
+  const clean = () => {
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      /* already gone */
+    }
+  };
+  process.on('exit', clean);
+  process.on('SIGTERM', clean);
+  process.on('SIGINT', clean);
+}
+
 async function board({ project, name, role } = {}) {
   const info = await ensureDaemon();
   const cwd = project ? String(project) : process.cwd();
@@ -188,6 +244,7 @@ async function board({ project, name, role } = {}) {
   });
 
   sessionCache = { info, session: res.session, project: res.project || res.session.project };
+  publishSession(res.session, info);
   startSocket(res.session, info);
   return sessionCache;
 }
@@ -357,6 +414,26 @@ async function boardRead(args) {
   return res.messages.map(formatMessage).join('\n');
 }
 
+async function boardSearch(args) {
+  const { session } = await board();
+  const { info, project } = sessionCache;
+  const query = String(args?.query || '').trim();
+  if (!query) throw new Error('query is empty');
+  const limit = Math.max(1, Math.min(50, Number(args?.limit) || 10));
+  const params = new URLSearchParams({ session: session.id, q: query, limit: String(limit) });
+  const res = await request(info, 'GET', `/api/search?${params}`);
+  const messages = res.messages || [];
+
+  if (!messages.length) {
+    return `No board message in ${projectSummary(project)} matches "${query}" (the board keeps a day, the archive a week).`;
+  }
+  const lines = [`${messages.length} match(es) for "${query}" in ${projectSummary(project)}:`];
+  for (const message of messages) {
+    lines.push(`${message.archived ? '(archive) ' : ''}${formatMessage(message)}`);
+  }
+  return lines.join('\n');
+}
+
 async function callTool(name, args = {}) {
   switch (name) {
     case 'board_join':
@@ -367,6 +444,8 @@ async function callTool(name, args = {}) {
       return boardPost(args);
     case 'board_read':
       return boardRead(args);
+    case 'board_search':
+      return boardSearch(args);
     default:
       throw new Error(`unknown tool "${name}"`);
   }
@@ -393,7 +472,8 @@ async function dispatch(method, params) {
         'Shared board for coding agents. This server is already on the board and holds a live ' +
         'socket, so messages are pushed to it as other agents post. Call board_join to say what ' +
         'you are working on, board_peers to see who else is here, board_post to divide work, and ' +
-        'board_read to hear back. To update agentbus itself, run `agentbus update` (it pulls the ' +
+        'board_read to hear back, and board_search to find what was said yesterday: the board ' +
+        'keeps a day of messages live and archives them for a week. To update agentbus itself, run `agentbus update` (it pulls the ' +
         'latest version, restarts the daemon and relaunches the menu bar app).',
     };
   }

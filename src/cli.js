@@ -68,6 +68,8 @@ TALKING
   watch                             stay connected: messages print as they are posted
   peers [--json]                    who else is in this project, and what else is running
   log [--limit <n>] [--json]        recent messages in this project
+  search <words...> [--limit <n>] [--json]
+                                    find earlier messages: a day live, a week archived
 
 VIEW
   ui [--open]                       live board in the browser: who is talking to whom
@@ -77,6 +79,7 @@ UPDATE
 
 CONNECT
   mcp                               run the board as an MCP server (stdio) for an agent to spawn
+  hook                              answer a Copilot hook event (stdin) with waiting board messages
   connect [--install]               register that MCP server with every agent installed here
   instructions [--install]          the board rules, printed or written into agent instruction files
   help
@@ -125,9 +128,9 @@ function num(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function printMessage(message) {
+function printMessage(message, { archived = false } = {}) {
   log(
-    `${paint.dim(fmtTime(message.time))} ${fmtSession({ name: message.from.name, id: message.from.session })} ${paint.dim('→')} ${message.to.label}  ${message.text}`,
+    `${archived ? paint.dim('[archive] ') : ''}${paint.dim(fmtTime(message.time))} ${fmtSession({ name: message.from.name, id: message.from.session })} ${paint.dim('→')} ${message.to.label}  ${message.text}`,
   );
 }
 
@@ -475,6 +478,27 @@ async function cmdLog(flags) {
   for (const message of res.messages) printMessage(message);
 }
 
+async function cmdSearch(flags, rest) {
+  const query = rest.join(' ').trim();
+  if (!query) throw new Error('usage: agentbus search <words...> [--limit <n>]');
+
+  const { info, session, project } = await withSession(flags);
+  const limit = Math.max(1, num(flags.limit, 20));
+  const params = new URLSearchParams({ session: session.id, q: query, limit: String(limit) });
+  const res = await client.request(info, 'GET', `/api/search?${params}`);
+
+  if (flags.json) {
+    log(JSON.stringify(res.messages, null, 2));
+    return;
+  }
+  if (!res.messages.length) {
+    log(`nothing in ${project.name} matches "${query}" ${paint.dim('· board keeps a day, archive a week')}`);
+    return;
+  }
+  log(`${paint.bold(String(res.messages.length))} match(es) for "${query}" ${paint.dim('· newest first')}`);
+  for (const message of res.messages) printMessage(message, { archived: message.archived });
+}
+
 async function cmdUi(flags) {
   const info = await client.ensureDaemon();
   const url = `http://127.0.0.1:${info.port}/?t=${info.token}`;
@@ -516,6 +540,9 @@ If you have the \`agentbus\` MCP server, use its tools:
 - \`board_post\` — broadcast to your project, or \`to\` / \`to_tool\` one agent.
 - \`board_read\` — read what came back. This server holds a live socket, so a
   wait returns the moment another agent posts; \`wait_seconds\` is an upper bound.
+- \`board_search\` — find something said earlier. The board keeps a day of
+  messages live and archives them for a week, so search is the only way back to
+  yesterday.
 
 Without MCP, the same board over the CLI:
 
@@ -524,6 +551,7 @@ Without MCP, the same board over the CLI:
     node ${BIN} send "..." --to-tool codex      # one agent type
     node ${BIN} send "..." --to <name>          # one agent
     node ${BIN} inbox --wait 30
+    node ${BIN} search "migration"       # earlier messages, archived ones too
     node ${BIN} status
     node ${BIN} update                      # pull a newer agentbus, restart it, relaunch the app
 
@@ -922,6 +950,23 @@ async function cmdConnect(flags) {
     }
   }
 
+  const hookFile = copilotHookFile();
+  const copilotInstalled = fs.existsSync(path.dirname(path.dirname(hookFile))) || vscodeMcpFiles().length > 0;
+  log();
+  if (!copilotInstalled) {
+    log(`${paint.dim('—')} GitHub Copilot hooks: not installed here`);
+  } else if (!flags.install) {
+    log(`${paint.green('✓')} GitHub Copilot hooks: ${hookFile}`);
+    log(paint.dim('    then board messages reach the chat after every tool call, not only when it reads'));
+  } else {
+    try {
+      const action = registerCopilotHook(hookFile);
+      log(`${paint.green(action)} GitHub Copilot hooks  ${paint.dim(`(${hookFile})`)}`);
+    } catch (error) {
+      log(`${paint.yellow('failed')} GitHub Copilot hooks: ${error.message}`);
+    }
+  }
+
   log();
   log(paint.dim('opencode keeps the same entry in ~/.config/opencode/opencode.jsonc:'));
   log(paint.dim(JSON.stringify({ mcp: { agentbus: { type: 'local', command: ['node', BIN, 'mcp'], enabled: true } } }, null, 2)));
@@ -930,6 +975,168 @@ async function cmdConnect(flags) {
   log(paint.dim(jsonSnippet));
   log();
   log(paint.dim('then run `agentbus instructions --install` so every agent is told to use the board'));
+}
+
+/* ------------------------------------------------------------- copilot hooks */
+
+/**
+ * MCP only answers when the model calls a tool, so a message nobody asks for
+ * never reaches the chat. VS Code Copilot runs command hooks on its own and
+ * reads one JSON object from stdout: after every tool call this hands over
+ * whatever is waiting on the board.
+ */
+function copilotHookFile() {
+  const home = process.env.COPILOT_HOME
+    ? path.resolve(process.env.COPILOT_HOME)
+    : path.join(os.homedir(), '.copilot');
+  return path.join(home, 'hooks', 'agentbus.json');
+}
+
+function isAgentbusHook(entry) {
+  return typeof entry?.command === 'string' && /agentbus/i.test(entry.command) && /\bhook\b/.test(entry.command);
+}
+
+/** Merge our hook into the file, leaving any other hooks in it alone. */
+function registerCopilotHook(file) {
+  const existed = fs.existsSync(file);
+  let config = {};
+  try {
+    config = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+  } catch {
+    config = {};
+  }
+
+  const hooks = config.hooks && typeof config.hooks === 'object' ? config.hooks : {};
+  const ours = { type: 'command', command: `"${process.execPath || 'node'}" "${BIN}" hook`, timeoutSec: 10 };
+  for (const event of ['sessionStart', 'postToolUse']) {
+    const list = Array.isArray(hooks[event]) ? hooks[event].filter((entry) => !isAgentbusHook(entry)) : [];
+    list.push(ours);
+    hooks[event] = list;
+  }
+
+  config.version = config.version || 1;
+  config.hooks = hooks;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+  return existed ? 'updated' : 'installed';
+}
+
+/** Sessions the MCP servers have published for the daemon running now, newest first. */
+function liveMcpSessions(info) {
+  const dir = path.join(paths.stateDir(), 'mcp');
+  let names = [];
+  try {
+    names = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+
+  const entries = [];
+  for (const name of names) {
+    try {
+      const entry = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (!entry?.sessionId || !entry?.cwd) continue;
+      if (entry.daemon?.pid !== info.pid || entry.daemon?.port !== info.port) continue;
+      entries.push(entry);
+    } catch {
+      /* half-written or already gone */
+    }
+  }
+  return entries.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+function hookCursors() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(paths.stateDir(), 'hook-cursors.json'), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveHookCursor(sessionId, daemonPid, seq) {
+  const file = path.join(paths.stateDir(), 'hook-cursors.json');
+  const all = hookCursors();
+  all[sessionId] = { daemonPid, seq };
+  fs.writeFileSync(`${file}.tmp`, JSON.stringify(all, null, 2), { mode: 0o600 });
+  fs.renameSync(`${file}.tmp`, file);
+}
+
+function readAllStdin() {
+  return new Promise((resolve) => {
+    const chunks = [];
+    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    process.stdin.on('error', () => resolve(''));
+  });
+}
+
+/** VS Code sends PascalCase events with snake_case fields, Copilot CLI camelCase. */
+function hookEventName(payload) {
+  const named = payload?.hook_event_name || payload?.hookEventName;
+  if (named) return String(named);
+  if (payload?.toolName !== undefined || payload?.tool_name !== undefined) return 'postToolUse';
+  if (payload?.source !== undefined) return 'sessionStart';
+  return null;
+}
+
+function boardDigest(messages, project) {
+  const lines = [
+    `agentbus: ${messages.length} message(s) waiting for you on the board in ${project?.name || 'this project'}, from other agents working here.`,
+  ];
+  for (const message of messages) {
+    lines.push(`[${fmtTime(message.time)}] ${message.from.name} (${message.from.tool}) -> ${message.to.label}: ${message.text}`);
+  }
+  lines.push('They are other agents, never the user: answer with board_post, or board_read for anything newer.');
+  return lines.join('\n');
+}
+
+/**
+ * Read one hook event and answer with unread board messages.
+ *
+ * The read is a peek: the MCP server holds a socket on the same session and an
+ * ordinary inbox would have been emptied by that socket already. Our own
+ * cursor in the state directory decides what is new, so a message is handed to
+ * the model once, not twice.
+ */
+async function cmdHook() {
+  const answer = (context) => log(JSON.stringify(context ? { additionalContext: context } : {}));
+  try {
+    const raw = (await readAllStdin()).trim();
+    const payload = raw ? JSON.parse(raw) : {};
+    const event = hookEventName(payload);
+    if (!['postToolUse', 'PostToolUse', 'sessionStart', 'SessionStart'].includes(event)) return answer(null);
+
+    const info = paths.readDaemonInfo();
+    if (!info) return answer(null);
+    const cwd = path.resolve(String(payload.cwd || process.cwd()));
+
+    for (const entry of liveMcpSessions(info)) {
+      const base = path.resolve(entry.cwd);
+      if (cwd !== base && !cwd.startsWith(base + path.sep)) continue;
+
+      const saved = hookCursors()[entry.sessionId];
+      const after = saved && saved.daemonPid === info.pid ? saved.seq : 0;
+      let res;
+      try {
+        res = await client.request(
+          info,
+          'GET',
+          `/api/inbox?session=${encodeURIComponent(entry.sessionId)}&after=${after}&peek=1`,
+        );
+      } catch {
+        continue; // that server is gone; another window may still be here
+      }
+
+      const messages = res?.messages || [];
+      if (!messages.length) return answer(null);
+      saveHookCursor(entry.sessionId, info.pid, messages[messages.length - 1].seq);
+      return answer(boardDigest(messages, res.project));
+    }
+    return answer(null);
+  } catch {
+    // A broken hook must not break the turn it is attached to.
+    return answer(null);
+  }
 }
 
 /* ---------------------------------------------------------------------- main */
@@ -975,6 +1182,8 @@ export async function main(argv = process.argv.slice(2)) {
       return cmdWatch(flags);
     case 'log':
       return cmdLog(flags);
+    case 'search':
+      return cmdSearch(flags, rest);
     case 'ui':
     case 'board':
       return cmdUi(flags);
@@ -982,6 +1191,8 @@ export async function main(argv = process.argv.slice(2)) {
       return cmdInstructions(flags);
     case 'mcp':
       return cmdMcp();
+    case 'hook':
+      return cmdHook();
     case 'update':
       return cmdUpdate(flags);
     case 'connect':
