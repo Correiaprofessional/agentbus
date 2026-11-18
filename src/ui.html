@@ -76,6 +76,7 @@
   .head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .who { font-weight: 600; }
   .arrow { color: #5d6577; }
+  .who.user { color: var(--accent); }
   .to { font-weight: 500; }
   .to.all { color: var(--muted); }
   .to.tool { color: #60a5fa; }
@@ -84,6 +85,34 @@
   .text { color: #cfd5e1; white-space: pre-wrap; overflow-wrap: anywhere; }
   .empty { color: var(--muted); padding: 16px; }
   .empty code { color: #c4b5fd; }
+  .project { cursor: pointer; }
+  .project.sel { background: #1b2030; box-shadow: inset 0 0 0 1px var(--line); }
+  .allproj { display: flex; align-items: baseline; gap: 6px; font-weight: 600; }
+  .count { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 11px; font-variant-numeric: tabular-nums; }
+  #brief { border-bottom: 1px solid var(--line); padding: 10px 16px 12px; background: #0e1117; }
+  #brief.off textarea { opacity: 0.55; }
+  #bproject {
+    font: inherit; color: var(--text); background: var(--panel); max-width: 260px;
+    border: 1px solid var(--line); border-radius: 7px; padding: 3px 6px;
+  }
+  #bproject:focus { outline: none; border-color: var(--accent); }
+  #bproject:disabled { opacity: 0.5; }
+  .brow { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+  .bname { font-weight: 600; }
+  .bstate { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .bstate.ok { color: #22c55e; }
+  #brief textarea {
+    width: 100%; min-height: 52px; resize: vertical; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit;
+  }
+  #brief textarea:focus { outline: none; border-color: var(--accent); }
+  .bactions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  #brief button {
+    padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line);
+    background: #1a1f2a; color: var(--text); font: inherit; cursor: pointer;
+  }
+  #brief button:hover:not(:disabled) { border-color: var(--accent); }
+  #brief button:disabled { opacity: 0.45; cursor: default; }
 </style>
 </head>
 <body>
@@ -98,7 +127,19 @@
     <div id="plist"></div>
   </aside>
   <section>
-    <h2>Who is talking to whom</h2>
+    <div id="brief" class="off">
+      <div class="brow">
+        <span class="bname">Say to</span>
+        <select id="bproject" disabled></select>
+        <span class="bstate" id="bstate"></span>
+      </div>
+      <textarea id="btext" rows="2" placeholder="What should the agents in this project know? House rules, what not to touch, where the credentials live. They read it as a message from User."></textarea>
+      <div class="bactions">
+        <button id="bsave" disabled>Send to these agents</button>
+        <span class="bstate" id="bhint">what you send lands in the conversation below, like any other message</span>
+      </div>
+    </div>
+    <h2 id="mtitle">Who is talking to whom</h2>
     <div id="msgs"></div>
   </section>
 </main>
@@ -162,6 +203,68 @@
   };
   const clock = (iso) => new Date(iso).toTimeString().slice(0, 8);
 
+  /* ----------------------------------------------- the user talking to agents */
+
+  // What you write goes to one project, so `focus` is the project in that box;
+  // `viewAll` is only what the message stream shows, and starts as every
+  // project. Picking a project does both: you talk to it, and you watch it.
+  let focus = null;
+  let viewAll = true;
+
+  const agentsHere = (overview) => {
+    if (!focus) return 0;
+    const entry = (overview?.otherProjects || []).find((e) => e.project.id === focus.id);
+    if (entry) return entry.sessions.length + (entry.running || []).length;
+    return (overview?.running || []).filter((r) => r.projectId === focus.id).length;
+  };
+
+  function paintNote(overview) {
+    $('bproject').disabled = !focus;
+    if (focus) $('bproject').value = focus.id;
+    $('mtitle').textContent = !viewAll && focus ? `Messages in ${focus.name}` : 'Who is talking to whom';
+    $('brief').className = focus ? '' : 'off';
+    $('btext').disabled = !focus;
+    $('bsave').disabled = !focus || !$('btext').value.trim();
+    $('bstate').textContent = focus
+      ? `${agentsHere(overview)} agent(s) in this project`
+      : 'no project is connected yet';
+    if (!focus) {
+      $('bhint').className = 'bstate';
+      $('bhint').textContent = 'start an agent in a project and you can talk to it here';
+    }
+  }
+
+  // A composer, not an editor: what you send is a message on the board, kept
+  // with the rest of the conversation, and the box empties for the next one.
+  async function say() {
+    if (!focus) return;
+    const project = focus;
+    const text = $('btext').value.trim();
+    if (!text) return;
+    $('bsave').disabled = true;
+    try {
+      const res = await fetch('/api/say', {
+        method: 'POST',
+        headers: { ...H, 'content-type': 'application/json' },
+        body: JSON.stringify({ project: project.id, name: project.name, text }),
+      }).then((r) => {
+        if (!r.ok) throw new Error(r.status);
+        return r.json();
+      });
+      $('btext').value = '';
+      $('bhint').className = 'bstate ok';
+      $('bhint').textContent = res.delivered
+        ? `sent to ${res.delivered} agent(s) in ${project.name}`
+        : `sent · nobody is listening in ${project.name} yet, so it waits in the log`;
+      if (!messages.some((m) => m.seq === res.message.seq)) messages.push(res.message);
+      paint();
+    } catch {
+      $('bhint').className = 'bstate';
+      $('bhint').textContent = 'could not send — daemon unreachable';
+    }
+    $('bsave').disabled = !$('btext').value.trim();
+  }
+
   function renderProjects(overview) {
     const projects = overview.otherProjects || [];
     const apps = overview.apps || [];
@@ -180,11 +283,26 @@
     const appsHtml = apps.length
       ? `<div class="project apps"><div class="pname">Applications</div>${apps.map(appRow).join('')}</div>`
       : '';
+    const focused = focus ? projects.find((entry) => entry.project.id === focus.id) : null;
+    if (focused) focus.name = focused.project.name;
+    // Talking needs a project, so the box starts on the first one listed rather
+    // than waiting for a click most people never know to make.
+    if (!focus && projects.length) focus = { id: projects[0].project.id, name: projects[0].project.name };
+    const names = projects.map((entry) => ({ id: entry.project.id, name: entry.project.name }));
+    if (focus && !names.some((entry) => entry.id === focus.id)) names.push({ id: focus.id, name: focus.name });
+    $('bproject').innerHTML = names
+      .map((entry) => `<option value="${esc(entry.id)}"${focus && focus.id === entry.id ? ' selected' : ''}>${esc(entry.name)}</option>`)
+      .join('');
+    const allRow = `<div class="project allproj${viewAll ? ' sel' : ''}" data-all="1">
+      <span class="pname">All projects</span>
+      <span class="count">${projects.length}</span>
+    </div>`;
     if (!projects.length && !apps.length) {
-      $('plist').innerHTML = '<div class="empty">No agents running or connected.<br>Open an agent in a project and it appears here.</div>';
+      $('plist').innerHTML =
+        allRow + '<div class="empty">No agents running or connected.<br>Open an agent in a project and it appears here.</div>';
       return;
     }
-    $('plist').innerHTML = appsHtml + projects.map((entry) => {
+    $('plist').innerHTML = allRow + appsHtml + projects.map((entry) => {
       const p = entry.project;
       const branch = p.branch ? `<span class="branch">${esc(p.branch)}</span>` : '';
       const same = entry.sameRepo ? '<span class="branch">same repo</span>' : '';
@@ -202,12 +320,15 @@
           <b>pid ${esc(r.pid)}</b>
           <span class="state">running</span>
         </div>`).join('');
-      return `<div class="project">
+      return `<div class="project${!viewAll && focus && focus.id === p.id ? ' sel' : ''}" data-id="${esc(p.id)}" data-name="${esc(p.name)}">
         <div class="pname">${esc(p.name)} ${branch} ${same}</div>
         ${sessions}${running}
       </div>`;
     }).join('');
   }
+
+  // Written by the person at the board, not by an agent (older ones said "you").
+  const isUser = (m) => m.from.tool === 'user' || m.from.tool === 'you';
 
   function renderMessages(messages) {
     if (!messages.length) {
@@ -216,14 +337,16 @@
     }
     $('msgs').innerHTML = messages.map((m) => {
       const target = m.to.kind === 'session' ? 'session' : m.to.kind;
-      const who = `${logoFor(m.from.tool)}<span class="who">${esc(m.from.name)}</span><span class="arrow">(${esc(m.from.tool)}) →</span>`;
+      const who = isUser(m)
+        ? '<span class="who user">User</span><span class="arrow">→</span>'
+        : `${logoFor(m.from.tool)}<span class="who">${esc(m.from.name)}</span><span class="arrow">(${esc(m.from.tool)}) →</span>`;
       return `<div class="msg">
         <div class="t">${clock(m.time)}</div>
         <div>
           <div class="head">
             <span class="who">${who}</span>
             <span class="to ${target}">${esc(m.to.label)}</span>
-            <span class="proj">${esc(m.project.name)}</span>
+            ${viewAll ? `<span class="proj">${esc(m.project.name)}</span>` : ''}
           </div>
           <div class="text">${esc(m.text)}</div>
         </div>
@@ -244,13 +367,18 @@
 
   async function refresh() {
     try {
+      const logUrl =
+        viewAll || !focus
+          ? '/api/log?limit=150'
+          : `/api/log?limit=150&project=${encodeURIComponent(focus.id)}`;
       const [overview, log] = await Promise.all([
         fetch('/api/overview', { headers: H }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
-        fetch('/api/log?limit=150', { headers: H }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+        fetch(logUrl, { headers: H }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }),
       ]);
       renderProjects(overview);
       messages = log.messages || [];
       paint();
+      paintNote(overview);
     } catch (err) {
       $('dot').className = 'dot dead';
       $('meta').textContent = 'daemon unreachable — is it still running?';
@@ -273,6 +401,7 @@
       let payload;
       try { payload = JSON.parse(event.data); } catch { return; }
       if (payload.type === 'message') {
+        if (!viewAll && focus && payload.message.project.id !== focus.id) return;
         if (!messages.some((m) => m.seq === payload.message.seq)) messages.push(payload.message);
         paint();
       } else if (payload.type === 'presence' || payload.type === 'ready') {
@@ -285,6 +414,43 @@
       setTimeout(connect, 1000);
     };
   }
+
+  // One project at a time, or all of them: the sidebar chooses.
+  $('plist').addEventListener('click', (event) => {
+    if (event.target.closest('[data-all]')) {
+      viewAll = true;
+      refresh();
+      return;
+    }
+    const row = event.target.closest('[data-id]');
+    if (!row) return;
+    const id = row.getAttribute('data-id');
+    const name = row.getAttribute('data-name') || id;
+    viewAll = false;
+    focus = { id, name };
+    refresh();
+  });
+
+  $('bproject').addEventListener('change', () => {
+    const picker = $('bproject');
+    const id = picker.value;
+    const name = picker.selectedOptions[0]?.textContent || id;
+    viewAll = false;
+    focus = { id, name };
+    refresh();
+  });
+
+  $('btext').addEventListener('input', () => {
+    $('bsave').disabled = !$('btext').value.trim();
+    $('bhint').className = 'bstate';
+    $('bhint').textContent = 'what you send lands in the conversation below, like any other message';
+  });
+
+  $('btext').addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') say();
+  });
+
+  $('bsave').addEventListener('click', say);
 
   refresh();
   connect();

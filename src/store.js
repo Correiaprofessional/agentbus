@@ -8,6 +8,16 @@ export const LIVE_MS = 24 * 60 * 60 * 1000;
 /** How long the archive keeps it before it is deleted. */
 export const KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * The person at the board page. No session stands behind their words, so every
+ * reader recognises the sender by the same mark.
+ */
+export const USER_TOOL = 'user';
+
+/** Was this message written by the user on the board page? Older ones said "you". */
+export const isUserMessage = (message) =>
+  message?.from?.tool === USER_TOOL || message?.from?.tool === 'you';
+
 export class BusError extends Error {
   constructor(status, message, extra = {}) {
     super(message);
@@ -210,6 +220,41 @@ export class Bus {
     }
 
     sender.lastSeen = this.now();
+    const delivered = this.activeSessions().filter((s) => this.delivers(message, s)).length;
+    this.wake();
+    return { message, delivered };
+  }
+
+  /**
+   * You talking to a project.
+   *
+   * No session stands behind these words, so the message is authored by "User"
+   * and then travels exactly like an agent's: it reaches everyone in the project
+   * through the same inbox, log, search and retention. Writing again appends
+   * rather than replaces, because the user keeps talking.
+   */
+  say(project, text) {
+    const body = String(text ?? '').trim();
+    if (!body) throw new BusError(400, 'message text is empty');
+    if (body.length > MAX_TEXT) throw new BusError(413, `message is longer than ${MAX_TEXT} characters`);
+
+    const message = {
+      id: crypto.randomBytes(5).toString('hex'),
+      seq: (this.seq += 1),
+      time: new Date().toISOString(),
+      project: { id: project.id, name: project.name || project.id, root: project.root || null },
+      from: { session: null, name: 'User', tool: USER_TOOL, role: 'user' },
+      to: { kind: 'broadcast', value: project.id, label: 'all' },
+      kind: 'user',
+      text: body,
+      replyTo: null,
+    };
+
+    this.messages.push(message);
+    if (this.messages.length > this.maxMessages) {
+      this.messages.splice(0, this.messages.length - this.maxMessages);
+    }
+
     const delivered = this.activeSessions().filter((s) => this.delivers(message, s)).length;
     this.wake();
     return { message, delivered };

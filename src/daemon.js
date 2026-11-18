@@ -155,6 +155,26 @@ export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
     }
   }
 
+  /**
+   * Push a new message to the board page and to every session it reaches.
+   *
+   * A pushed message is consumed: the session cursor moves with it, so an HTTP
+   * inbox never hands the same message out twice.
+   */
+  function deliverMessage(message) {
+    for (const client of sockets) {
+      if (client.mode === 'board') {
+        client.send({ type: 'message', message });
+        continue;
+      }
+      const session = sessionOf(client);
+      if (!session || !bus.delivers(message, session)) continue;
+      session.cursor = Math.max(session.cursor, message.seq);
+      client.send({ type: 'message', message });
+    }
+    broadcast({ type: 'presence' }, (client) => client.mode === 'board');
+  }
+
   function sessionOf(client) {
     return client.sessionId ? bus.getSession(client.sessionId) : null;
   }
@@ -294,19 +314,7 @@ export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
         note(
           `msg ${message.from.name}(${message.from.session}) -> ${message.to.label} in ${message.project.name}`,
         );
-        for (const client of sockets) {
-          if (client.mode === 'board') {
-            client.send({ type: 'message', message });
-            continue;
-          }
-          const session = sessionOf(client);
-          if (!session || !bus.delivers(message, session)) continue;
-          // A pushed message is consumed: the session cursor moves with it, so
-          // an HTTP inbox never hands the same message out twice.
-          session.cursor = Math.max(session.cursor, message.seq);
-          client.send({ type: 'message', message });
-        }
-        broadcast({ type: 'presence' }, (client) => client.mode === 'board');
+        deliverMessage(message);
         sendJson(res, 200, { message, delivered });
         return;
       }
@@ -321,7 +329,10 @@ export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
         const peek = url.searchParams.get('peek') === '1';
         const result = peek ? bus.peek(sessionId, { after }) : await bus.inbox(sessionId, { after, waitMs });
         if (!result) throw new BusError(404, 'unknown session — re-run `agentbus join`');
-        sendJson(res, 200, { ...result, ...bus.overview(sessionId) });
+        sendJson(res, 200, {
+          ...result,
+          ...bus.overview(sessionId),
+        });
         return;
       }
 
@@ -348,6 +359,24 @@ export async function runDaemon({ port = 0, host = '127.0.0.1', token } = {}) {
           .sort((a, b) => new Date(b.time) - new Date(a.time))
           .slice(0, limit);
         sendJson(res, 200, { query, project: session?.project ?? null, messages });
+        return;
+      }
+
+      // You speaking to one project from the board page. It is a board message
+      // like any other — same delivery, same log, same retention — only the
+      // sender is the person at the window instead of an agent, and writing
+      // again adds a message rather than replacing the last one.
+      if (pathname === '/api/say' && method === 'POST') {
+        const body = await readBody(req);
+        const projectId = String(body.project || '').trim();
+        if (!projectId) throw new BusError(400, 'missing project');
+        const { message, delivered } = bus.say(
+          { id: projectId, name: String(body.name || '').trim() || projectId, root: null },
+          body.text,
+        );
+        note(`User -> all in ${message.project.name}`);
+        deliverMessage(message);
+        sendJson(res, 200, { message, delivered });
         return;
       }
 
